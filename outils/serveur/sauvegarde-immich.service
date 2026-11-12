@@ -1,0 +1,10 @@
+[Unit]
+Description=Sauvegarde chiffrée d'Immich vers la Time Capsule (restic)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sauvegarde-immich.sh sauvegarder
+Nice=10
+IOSchedulingClass=idle

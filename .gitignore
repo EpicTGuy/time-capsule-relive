@@ -1,0 +1,16 @@
+# Code Apple (binaires copiés de l'appareil, images de mise à jour) : jamais dans le dépôt
+binaires/
+*.basebinary
+# Configurations, dumps ACP, mots de passe
+sauvegardes/
+# Clone de référence du projet amont
+upstream/
+# Projets Ghidra
+*.gpr
+*.rep/
+.DS_Store
+.re-tools/
+__pycache__/
+config.local
+.claude/
+analyse/go-diag4/table.go

@@ -1,0 +1,90 @@
+diff -ru a/src/runtime/defs1_netbsd_arm.go b/src/runtime/defs1_netbsd_arm.go
+--- a/src/runtime/defs1_netbsd_arm.go	2026-10-20 00:20:36
++++ b/src/runtime/defs1_netbsd_arm.go	2026-10-29 09:06:12
+@@ -155,7 +155,8 @@
+ 	uc_link     *ucontextt
+ 	uc_sigmask  sigset
+ 	uc_stack    stackt
+-	_           [4]byte // EABI
++	// NetBSD 6 (AirPort Time Capsule) : pas de remplissage EABI ici, uc_mcontext
++	// commence à l'octet 36 (vérifié sur l'appareil avec getcontext).
+ 	uc_mcontext mcontextt
+ 	__uc_pad    [2]int32
+ }
+diff -ru a/src/runtime/os_netbsd.go b/src/runtime/os_netbsd.go
+--- a/src/runtime/os_netbsd.go	2026-10-20 00:20:36
++++ b/src/runtime/os_netbsd.go	2026-10-29 09:05:56
+@@ -167,7 +167,9 @@
+ 			if wait <= 0 {
+ 				return -1
+ 			}
+-			ts.setNsec(wait)
++			// NetBSD 6 : échéance absolue sur l'horloge réelle (___lwp_park50).
++			sec, nsec := walltime()
++			ts.setNsec(sec*1000000000 + int64(nsec) + wait)
+ 			tsp = &ts
+ 		}
+ 		ret := lwp_park(_CLOCK_MONOTONIC, _TIMER_RELTIME, tsp, 0, unsafe.Pointer(&gp.m.waitsemacount), nil)
+@@ -217,8 +219,17 @@
+ 	var oset sigset
+ 	sigprocmask(_SIG_SETMASK, &sigset_all, &oset)
+ 
+-	lwp_mcontext_init(&uc.uc_mcontext, stk, mp, mp.g0, abi.FuncPCABI0(netbsdMstart))
+-
++	// NetBSD 6 (AirPort Time Capsule) : le noyau place uc_mcontext à l'octet 36,
++	// sans le remplissage EABI de NetBSD 7+ que suppose ucontextt. On écrit donc
++	// les registres aux positions du noyau, et le CPSR en mode utilisateur (0x10).
++	mots := (*[26]uint32)(unsafe.Pointer(&uc))
++	g := mots[9:26:26]
++	g[0] = uint32(uintptr(unsafe.Pointer(mp)))
++	g[1] = uint32(uintptr(unsafe.Pointer(mp.g0)))
++	g[2] = uint32(abi.FuncPCABI0(netbsdMstart))
++	g[13] = uint32(uintptr(stk))
++	g[15] = uint32(abi.FuncPCABI0(lwp_tramp))
++	g[16] = 0x10
+ 	ret := retryOnEAGAIN(func() int32 {
+ 		errno := lwp_create(unsafe.Pointer(&uc), _LWP_DETACHED, unsafe.Pointer(&mp.procid))
+ 		// lwp_create returns negative errno
+diff -ru a/src/runtime/signal_netbsd.go b/src/runtime/signal_netbsd.go
+--- a/src/runtime/signal_netbsd.go	2026-10-20 00:20:36
++++ b/src/runtime/signal_netbsd.go	2026-10-29 13:01:41
+@@ -17,7 +17,10 @@
+ 	/*  9 */ {0, "SIGKILL: kill"},
+ 	/* 10 */ {_SigPanic + _SigUnblock, "SIGBUS: bus error"},
+ 	/* 11 */ {_SigPanic + _SigUnblock, "SIGSEGV: segmentation violation"},
+-	/* 12 */ {_SigThrow, "SIGSYS: bad system call"},
++	// NetBSD 6 (AirPort Time Capsule) : les appels système apparus après NetBSD 6
++	// (wait6, ___lwp_park60…) envoient SIGSYS puis renvoient ENOSYS. On laisse
++	// passer le signal pour que la bibliothèque standard utilise ses replis.
++	/* 12 */ {_SigNotify, "SIGSYS: bad system call"},
+ 	/* 13 */ {_SigNotify, "SIGPIPE: write to broken pipe"},
+ 	/* 14 */ {_SigNotify, "SIGALRM: alarm clock"},
+ 	/* 15 */ {_SigNotify + _SigKill, "SIGTERM: termination"},
+diff -ru a/src/runtime/sys_netbsd_arm.s b/src/runtime/sys_netbsd_arm.s
+--- a/src/runtime/sys_netbsd_arm.s	2026-10-20 00:20:36
++++ b/src/runtime/sys_netbsd_arm.s	2026-10-29 09:05:09
+@@ -125,16 +125,14 @@
+ 	SWI $SYS_sched_yield
+ 	RET
+ 
+-TEXT runtime·lwp_park(SB),NOSPLIT,$8
+-	MOVW clockid+0(FP), R0		// arg 1 - clock_id
+-	MOVW flags+4(FP), R1		// arg 2 - flags
+-	MOVW ts+8(FP), R2		// arg 3 - ts
+-	MOVW unpark+12(FP), R3		// arg 4 - unpark
+-	MOVW hint+16(FP), R4		// arg 5 - hint
+-	MOVW R4, 4(R13)
+-	MOVW unparkhint+20(FP), R5	// arg 6 - unparkhint
+-	MOVW R5, 8(R13)
+-	SWI $SYS____lwp_park60
++TEXT runtime·lwp_park(SB),NOSPLIT,$0
++	// Time Capsule (NetBSD 6) : ___lwp_park60 n'existe pas ; ___lwp_park50 (434)
++	// prend (ts absolu CLOCK_REALTIME, unpark, hint, unparkhint). semasleep convertit.
++	MOVW ts+8(FP), R0		// arg 1 - ts
++	MOVW unpark+12(FP), R1		// arg 2 - unpark
++	MOVW hint+16(FP), R2		// arg 3 - hint
++	MOVW unparkhint+20(FP), R3	// arg 4 - unparkhint
++	SWI $0xa001b2			// SWI_OS_NETBSD | 434
+ 	MOVW	R0, ret+24(FP)
+ 	RET
+ 

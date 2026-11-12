@@ -1,0 +1,8 @@
+[Unit]
+Description=Sonde de la Time Capsule (ACP en lecture seule, alertes ntfy)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/sonde-tc/sonde-tc.py

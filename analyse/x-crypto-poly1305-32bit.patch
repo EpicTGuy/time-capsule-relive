@@ -1,0 +1,207 @@
+diff -ruN a/internal/poly1305/sum_32bit.go b/internal/poly1305/sum_32bit.go
+--- a/internal/poly1305/sum_32bit.go	1970-01-01 01:00:00
++++ b/internal/poly1305/sum_32bit.go	2026-10-29 12:29:42
+@@ -0,0 +1,101 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package poly1305
++
++import "encoding/binary"
++
++// updateDonna32 is equivalent to updateGeneric64, but represents the
++// accumulator and r in five 26-bit limbs ("poly1305-donna-32"), so that every
++// product is a single 32×32→64-bit multiplication. On 32-bit platforms such as
++// ARMv7, bits.Mul64 is emulated with several multiplications and is about
++// three times slower than this.
++//
++// The state is converted to and from the saturated 64-bit limbs of macState at
++// each call, so the two implementations can be used interchangeably.
++func updateDonna32(state *macState, msg []byte) {
++	const mask = 0x3ffffff
++
++	// r, clamped, in 26-bit limbs, and 5·r for the reduction modulo 2¹³⁰ - 5.
++	rl, rh := state.r[0], state.r[1]
++	r0 := uint32(rl) & mask
++	r1 := uint32(rl>>26) & mask
++	r2 := uint32(rl>>52|rh<<12) & mask
++	r3 := uint32(rh>>14) & mask
++	r4 := uint32(rh >> 40)
++	s1, s2, s3, s4 := r1*5, r2*5, r3*5, r4*5
++
++	// h in 26-bit limbs. h₄ may exceed 26 bits, as h may exceed 2¹³⁰.
++	h0 := uint32(state.h[0]) & mask
++	h1 := uint32(state.h[0]>>26) & mask
++	h2 := uint32(state.h[0]>>52|state.h[1]<<12) & mask
++	h3 := uint32(state.h[1]>>14) & mask
++	h4 := uint32(state.h[1]>>40 | state.h[2]<<24)
++
++	var block [TagSize]byte
++	for len(msg) > 0 {
++		m := msg
++		hibit := uint32(1 << 24) // the 2¹²⁸ bit of a full block
++		if len(msg) >= TagSize {
++			msg = msg[TagSize:]
++		} else {
++			// The last, partial block is padded with a 1 byte and zeroes.
++			block = [TagSize]byte{}
++			copy(block[:], msg)
++			block[len(msg)] = 1
++			m = block[:]
++			msg = nil
++			hibit = 0
++		}
++
++		h0 += binary.LittleEndian.Uint32(m[0:]) & mask
++		h1 += (binary.LittleEndian.Uint32(m[3:]) >> 2) & mask
++		h2 += (binary.LittleEndian.Uint32(m[6:]) >> 4) & mask
++		h3 += (binary.LittleEndian.Uint32(m[9:]) >> 6) & mask
++		h4 += (binary.LittleEndian.Uint32(m[12:]) >> 8) | hibit
++
++		// h = h * r, folding the limbs above 2¹³⁰ back with ×5.
++		d0 := uint64(h0)*uint64(r0) + uint64(h1)*uint64(s4) + uint64(h2)*uint64(s3) + uint64(h3)*uint64(s2) + uint64(h4)*uint64(s1)
++		d1 := uint64(h0)*uint64(r1) + uint64(h1)*uint64(r0) + uint64(h2)*uint64(s4) + uint64(h3)*uint64(s3) + uint64(h4)*uint64(s2)
++		d2 := uint64(h0)*uint64(r2) + uint64(h1)*uint64(r1) + uint64(h2)*uint64(r0) + uint64(h3)*uint64(s4) + uint64(h4)*uint64(s3)
++		d3 := uint64(h0)*uint64(r3) + uint64(h1)*uint64(r2) + uint64(h2)*uint64(r1) + uint64(h3)*uint64(r0) + uint64(h4)*uint64(s4)
++		d4 := uint64(h0)*uint64(r4) + uint64(h1)*uint64(r3) + uint64(h2)*uint64(r2) + uint64(h3)*uint64(r1) + uint64(h4)*uint64(r0)
++
++		// Partial carry propagation.
++		c := uint32(d0 >> 26)
++		h0 = uint32(d0) & mask
++		d1 += uint64(c)
++		c = uint32(d1 >> 26)
++		h1 = uint32(d1) & mask
++		d2 += uint64(c)
++		c = uint32(d2 >> 26)
++		h2 = uint32(d2) & mask
++		d3 += uint64(c)
++		c = uint32(d3 >> 26)
++		h3 = uint32(d3) & mask
++		d4 += uint64(c)
++		c = uint32(d4 >> 26)
++		h4 = uint32(d4) & mask
++		h0 += c * 5
++		c = h0 >> 26
++		h0 &= mask
++		h1 += c
++	}
++
++	// Carry h₁..h₃ into the next limb so that only h₄ may exceed 26 bits,
++	// then pack back into saturated 64-bit limbs. h stays below 2¹³⁰ + 2²⁷,
++	// within the 2 · (2¹³⁰ - 5) bound that finalize expects.
++	c := h1 >> 26
++	h1 &= mask
++	h2 += c
++	c = h2 >> 26
++	h2 &= mask
++	h3 += c
++	c = h3 >> 26
++	h3 &= mask
++	h4 += c
++	state.h[0] = uint64(h0) | uint64(h1)<<26 | uint64(h2)<<52
++	state.h[1] = uint64(h2)>>12 | uint64(h3)<<14 | uint64(h4)<<40
++	state.h[2] = uint64(h4) >> 24
++}
+diff -ruN a/internal/poly1305/sum_32bit_test.go b/internal/poly1305/sum_32bit_test.go
+--- a/internal/poly1305/sum_32bit_test.go	1970-01-01 01:00:00
++++ b/internal/poly1305/sum_32bit_test.go	2026-10-29 12:29:42
+@@ -0,0 +1,58 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package poly1305
++
++import (
++	"math/rand"
++	"testing"
++)
++
++// TestDonna32MatchesGeneric64 checks that both update implementations produce
++// the same state for random keys, states and message lengths, including
++// partial final blocks and accumulators close to the reduction bound.
++func TestDonna32MatchesGeneric64(t *testing.T) {
++	rng := rand.New(rand.NewSource(1))
++	for i := 0; i < 20000; i++ {
++		var key [32]byte
++		rng.Read(key[:])
++		var a macState
++		initialize(&key, &a)
++		// Arbitrary starting accumulator below 2 · (2¹³⁰ - 5).
++		a.h[0], a.h[1], a.h[2] = rng.Uint64(), rng.Uint64(), uint64(rng.Intn(8))
++		b := a
++		msg := make([]byte, rng.Intn(200))
++		rng.Read(msg)
++		updateGeneric64(&a, msg)
++		updateDonna32(&b, msg)
++		var ta, tb [TagSize]byte
++		finalize(&ta, &a.h, &a.s)
++		finalize(&tb, &b.h, &b.s)
++		if ta != tb {
++			t.Fatalf("iteration %d (len %d): tags differ %x / %x", i, len(msg), ta, tb)
++		}
++	}
++}
++
++func BenchmarkDonna32(b *testing.B) {
++	var key [32]byte
++	var s macState
++	initialize(&key, &s)
++	msg := make([]byte, 1420)
++	b.SetBytes(int64(len(msg)))
++	for i := 0; i < b.N; i++ {
++		updateDonna32(&s, msg)
++	}
++}
++
++func BenchmarkGeneric64(b *testing.B) {
++	var key [32]byte
++	var s macState
++	initialize(&key, &s)
++	msg := make([]byte, 1420)
++	b.SetBytes(int64(len(msg)))
++	for i := 0; i < b.N; i++ {
++		updateGeneric64(&s, msg)
++	}
++}
+diff -ruN a/internal/poly1305/sum_generic.go b/internal/poly1305/sum_generic.go
+--- a/internal/poly1305/sum_generic.go	2026-10-29 09:06:53
++++ b/internal/poly1305/sum_generic.go	2026-10-29 12:29:42
+@@ -143,7 +143,7 @@
+ //
+ // If the msg length is not a multiple of TagSize, it assumes the last
+ // incomplete chunk is the final one.
+-func updateGeneric(state *macState, msg []byte) {
++func updateGeneric64(state *macState, msg []byte) {
+ 	h0, h1, h2 := state.h[0], state.h[1], state.h[2]
+ 	r0, r1 := state.r[0], state.r[1]
+ 
+diff -ruN a/internal/poly1305/update_32bit.go b/internal/poly1305/update_32bit.go
+--- a/internal/poly1305/update_32bit.go	1970-01-01 01:00:00
++++ b/internal/poly1305/update_32bit.go	2026-10-29 12:29:42
+@@ -0,0 +1,11 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build 386 || arm || mips || mipsle
++
++package poly1305
++
++// On 32-bit platforms the 26-bit limb implementation avoids emulated 64-bit
++// multiplications.
++func updateGeneric(state *macState, msg []byte) { updateDonna32(state, msg) }
+diff -ruN a/internal/poly1305/update_64bit.go b/internal/poly1305/update_64bit.go
+--- a/internal/poly1305/update_64bit.go	1970-01-01 01:00:00
++++ b/internal/poly1305/update_64bit.go	2026-10-29 12:29:42
+@@ -0,0 +1,9 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build !(386 || arm || mips || mipsle)
++
++package poly1305
++
++func updateGeneric(state *macState, msg []byte) { updateGeneric64(state, msg) }

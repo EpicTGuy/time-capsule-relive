@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+/mnt/Flash/boot.sh </dev/null >/dev/null 2>&1 &
+
+# Time Capsule — seconde vie (swap, WireGuard) : voir /mnt/Flash/seconde-vie.sh
+/mnt/Flash/seconde-vie.sh </dev/null >/dev/null 2>&1 &
+
+exit 0
